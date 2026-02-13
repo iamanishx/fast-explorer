@@ -1,8 +1,16 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shlobj.h>
+#include <shellapi.h>
+#include <shobjidl.h>
 #include <string.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <io.h>
+
+#ifndef LVS_EX_FULLROWSELECT
+#define LVS_EX_FULLROWSELECT 0x00000020
+#endif
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -18,6 +26,16 @@
 #define IDM_BACK 2003
 #define IDM_FORWARD 2004
 
+#define OPC_COPY 3001
+#define OPC_CUT 3002
+#define OPC_PASTE 3003
+#define OPC_DELETE 3004
+#define OPC_RENAME 3005
+#define OPC_OPEN 3006
+#define OPC_PROPERTIES 3007
+#define OPC_NEWFOLDER 3008
+#define OPC_NEWFILE 3009
+
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 
 HWND hTree, hList, hStatus, hToolBar;
@@ -27,6 +45,9 @@ char history[50][MAX_PATH];
 int historyPos = -1;
 int historyCount = 0;
 int isNavigating = 0;
+char clipPath[MAX_PATH * 100];
+int clipOp = 0;
+int isCut = 0;
 
 void PopulateTreeView();
 void PopulateListView(const char* path);
@@ -35,11 +56,23 @@ void NavigateBack();
 void NavigateForward();
 void Refresh();
 void OpenSelectedItem();
+void CreateNewFolder();
+void CreateNewFile();
 void ResizeControls(HWND hwnd);
 void AddToHistory(const char* path);
+void GetFileIcon(const char* path, SHFILEINFO* shfi);
+void CopyFiles();
+void CutFiles();
+void PasteFiles();
+void DeleteFiles();
+void DoRename();
+void ShowContextMenu(HWND hwnd, int x, int xParam);
+void GetSelectedFiles(char* out, int* count);
+void AddSystemIcons();
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     InitCommonControls();
+    clipPath[0] = 0;
 
     WNDCLASSEX wc;
     wc.cbSize = sizeof(WNDCLASSEX);
@@ -59,6 +92,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     HWND hwnd = CreateWindowEx(0, "FastExplorer", "Fast Explorer", WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME,
         CW_USEDEFAULT, CW_USEDEFAULT, 1100, 700, NULL, NULL, hInstance, NULL);
     ShowWindow(hwnd, nCmdShow);
+    DragAcceptFiles(hwnd, TRUE);
 
     HWND hBtnBack = CreateWindow("BUTTON", "< Back", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 5, 70, 25, hwnd, (HMENU)IDM_BACK, hInstance, NULL);
     HWND hBtnForward = CreateWindow("BUTTON", "> Fwd", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 85, 5, 60, 25, hwnd, (HMENU)IDM_FORWARD, hInstance, NULL);
@@ -71,7 +105,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     hTree = CreateWindowEx(WS_EX_CLIENTEDGE, WC_TREEVIEW, NULL, WS_CHILD | WS_VISIBLE | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT,
         0, 0, 0, 0, hwnd, (HMENU)ID_TREE_VIEW, hInstance, NULL);
 
-    hList = CreateWindowEx(WS_EX_CLIENTEDGE, WC_LISTVIEW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+    hList = CreateWindowEx(WS_EX_CLIENTEDGE, WC_LISTVIEW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_EX_FULLROWSELECT,
         0, 0, 0, 0, hwnd, (HMENU)ID_LIST_VIEW, hInstance, NULL);
 
     LVCOLUMN lvc;
@@ -90,14 +124,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     lvc.pszText = "Modified";
     ListView_InsertColumn(hList, 3, &lvc);
 
-    hImageList = ImageList_Create(16, 16, ILC_COLOR32, 16, 16);
-    TreeView_SetImageList(hTree, hImageList, TVSIL_NORMAL);
+    AddSystemIcons();
     ListView_SetImageList(hList, hImageList, LVSIL_SMALL);
-
-    SHFILEINFO shfi;
-    SHGetFileInfo("C:\\", FILE_ATTRIBUTE_DIRECTORY, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_SMALLICON);
-    ImageList_AddIcon(hImageList, shfi.hIcon);
-    DestroyIcon(shfi.hIcon);
 
     PopulateTreeView();
     ResizeControls(hwnd);
@@ -108,6 +136,55 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         DispatchMessage(&msg);
     }
     return 0;
+}
+
+void AddSystemIcons() {
+    hImageList = ImageList_Create(16, 16, ILC_COLOR32, 8, 8);
+    SHFILEINFO shfi;
+    
+    SHGetFileInfo("C:\\", FILE_ATTRIBUTE_DIRECTORY, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+    ImageList_AddIcon(hImageList, shfi.hIcon);
+    DestroyIcon(shfi.hIcon);
+    
+    SHGetFileInfo(".txt", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+    ImageList_AddIcon(hImageList, shfi.hIcon);
+    DestroyIcon(shfi.hIcon);
+    
+    SHGetFileInfo(".exe", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+    ImageList_AddIcon(hImageList, shfi.hIcon);
+    DestroyIcon(shfi.hIcon);
+    
+    SHGetFileInfo(".jpg", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+    ImageList_AddIcon(hImageList, shfi.hIcon);
+    DestroyIcon(shfi.hIcon);
+    
+    SHGetFileInfo(".png", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+    ImageList_AddIcon(hImageList, shfi.hIcon);
+    DestroyIcon(shfi.hIcon);
+    
+    SHGetFileInfo(".mp3", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+    ImageList_AddIcon(hImageList, shfi.hIcon);
+    DestroyIcon(shfi.hIcon);
+    
+    SHGetFileInfo(".zip", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+    ImageList_AddIcon(hImageList, shfi.hIcon);
+    DestroyIcon(shfi.hIcon);
+    
+    SHGetFileInfo("folder", FILE_ATTRIBUTE_DIRECTORY, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+    ImageList_AddIcon(hImageList, shfi.hIcon);
+    DestroyIcon(shfi.hIcon);
+}
+
+int GetIconIndex(const char* name, int isDir) {
+    if (isDir) return 0;
+    const char* ext = strrchr(name, '.');
+    if (!ext) return 1;
+    if (!_stricmp(ext, ".exe") || !_stricmp(ext, ".bat") || !_stricmp(ext, ".cmd") || !_stricmp(ext, ".com")) return 2;
+    if (!_stricmp(ext, ".jpg") || !_stricmp(ext, ".jpeg") || !_stricmp(ext, ".bmp") || !_stricmp(ext, ".gif")) return 3;
+    if (!_stricmp(ext, ".png") || !_stricmp(ext, ".ico") || !_stricmp(ext, ".svg")) return 4;
+    if (!_stricmp(ext, ".mp3") || !_stricmp(ext, ".wav") || !_stricmp(ext, ".flac") || !_stricmp(ext, ".aac")) return 5;
+    if (!_stricmp(ext, ".zip") || !_stricmp(ext, ".rar") || !_stricmp(ext, ".7z") || !_stricmp(ext, ".tar")) return 6;
+    return 1;
 }
 
 void PopulateTreeView() {
@@ -159,7 +236,7 @@ void PopulateListView(const char* path) {
         lvi.mask = LVIF_TEXT | LVIF_IMAGE;
         lvi.iItem = idx;
         lvi.pszText = fd.cFileName;
-        lvi.iImage = isDir ? 0 : 1;
+        lvi.iImage = GetIconIndex(fd.cFileName, isDir);
         int row = ListView_InsertItem(hList, &lvi);
 
         if (!isDir) {
@@ -172,6 +249,14 @@ void PopulateListView(const char* path) {
             else if (fs.QuadPart < 1073741824) sprintf(sz, "%.1f MB", fs.QuadPart / 1048576.0);
             else sprintf(sz, "%.2f GB", fs.QuadPart / 1073741824.0);
             ListView_SetItemText(hList, row, 1, sz);
+            
+            const char* ext = strrchr(fd.cFileName, '.');
+            if (ext) {
+                char type[64];
+                sprintf(type, "%s File", ext + 1);
+                strupr(type);
+                ListView_SetItemText(hList, row, 2, type);
+            }
         } else {
             ListView_SetItemText(hList, row, 2, "File folder");
         }
@@ -237,9 +322,202 @@ void AddToHistory(const char* path) {
 
 void Refresh() { if (strlen(currentPath) > 0) PopulateListView(currentPath); }
 
+int editItem = -1;
+
+void CreateNewFolder() {
+    char name[MAX_PATH] = "New Folder";
+    int counter = 1;
+    char path[MAX_PATH];
+    
+    while (1) {
+        sprintf(path, "%s\\%s", currentPath, name);
+        if (GetFileAttributes(path) == INVALID_FILE_ATTRIBUTES) break;
+        sprintf(name, "New Folder (%d)", counter++);
+    }
+    
+    CreateDirectory(path, NULL);
+    editItem = -1;
+    Refresh();
+    
+    int itemCount = ListView_GetItemCount(hList);
+    for (int i = 0; i < itemCount; i++) {
+        char itemText[MAX_PATH];
+        LVITEM lvi = {0};
+        lvi.mask = LVIF_TEXT;
+        lvi.iItem = i;
+        lvi.pszText = itemText;
+        lvi.cchTextMax = MAX_PATH;
+        ListView_GetItem(hList, &lvi);
+        if (strcmp(itemText, name) == 0) {
+            editItem = i;
+            break;
+        }
+    }
+    
+    if (editItem >= 0) {
+        SetTimer(hList, 2, 50, NULL);
+    }
+}
+
+void CreateNewFile() {
+    char name[MAX_PATH] = "New File.txt";
+    int counter = 1;
+    char path[MAX_PATH];
+    
+    while (1) {
+        sprintf(path, "%s\\%s", currentPath, name);
+        if (GetFileAttributes(path) == INVALID_FILE_ATTRIBUTES) break;
+        if (counter == 1) sprintf(name, "New File (%d).txt", counter++);
+        else sprintf(name, "New File (%d).txt", counter++);
+    }
+    
+    HANDLE hf = CreateFile(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
+    
+    editItem = -1;
+    Refresh();
+    
+    int itemCount = ListView_GetItemCount(hList);
+    for (int i = 0; i < itemCount; i++) {
+        char itemText[MAX_PATH];
+        LVITEM lvi = {0};
+        lvi.mask = LVIF_TEXT;
+        lvi.iItem = i;
+        lvi.pszText = itemText;
+        lvi.cchTextMax = MAX_PATH;
+        ListView_GetItem(hList, &lvi);
+        if (strcmp(itemText, name) == 0) {
+            editItem = i;
+            break;
+        }
+    }
+    
+    if (editItem >= 0) {
+        SetTimer(hList, 2, 50, NULL);
+    }
+}
+
 void OpenSelectedItem() {
+    char files[MAX_PATH * 100];
+    int count;
+    GetSelectedFiles(files, &count);
+    if (count == 0) return;
+    
+    char* p = files;
+    while (*p) {
+        WIN32_FIND_DATA fd;
+        HANDLE hf = FindFirstFile(p, &fd);
+        if (hf != INVALID_HANDLE_VALUE) {
+            FindClose(hf);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                PopulateListView(p);
+                return;
+            } else {
+                ShellExecute(NULL, "open", p, NULL, NULL, SW_SHOWNORMAL);
+            }
+        }
+        p += strlen(p) + 1;
+    }
+}
+
+void GetSelectedFiles(char* out, int* count) {
+    out[0] = 0;
+    *count = 0;
+    int i = -1;
+    while ((i = ListView_GetNextItem(hList, i, LVNI_SELECTED)) != -1) {
+        char name[MAX_PATH];
+        LVITEM lvi;
+        memset(&lvi, 0, sizeof(lvi));
+        lvi.mask = LVIF_TEXT;
+        lvi.iItem = i;
+        lvi.pszText = name;
+        lvi.cchTextMax = MAX_PATH;
+        ListView_GetItem(hList, &lvi);
+        char fp[MAX_PATH];
+        sprintf(fp, "%s\\%s", currentPath, name);
+        strcat(out, fp);
+        out += strlen(fp) + 1;
+        (*count)++;
+    }
+    *out = 0;
+}
+
+void CopyFiles() {
+    char files[MAX_PATH * 100];
+    int count;
+    GetSelectedFiles(files, &count);
+    if (count == 0) return;
+    strcpy(clipPath, files);
+    clipOp = 1;
+    isCut = 0;
+}
+
+void CutFiles() {
+    char files[MAX_PATH * 100];
+    int count;
+    GetSelectedFiles(files, &count);
+    if (count == 0) return;
+    strcpy(clipPath, files);
+    clipOp = 1;
+    isCut = 1;
+}
+
+void PasteFiles() {
+    if (!clipOp || !clipPath[0]) return;
+    
+    char* src = clipPath;
+    while (*src) {
+        char name[MAX_PATH];
+        char* p = strrchr(src, '\\');
+        if (p) strcpy(name, p + 1);
+        else strcpy(name, src);
+        
+        char dst[MAX_PATH];
+        sprintf(dst, "%s\\%s", currentPath, name);
+        
+        if (isCut) {
+            if (MoveFile(src, dst)) {
+            }
+        } else {
+            if (CopyFile(src, dst, FALSE)) {
+            }
+        }
+        src += strlen(src) + 1;
+    }
+    
+    if (isCut) {
+        clipPath[0] = 0;
+        clipOp = 0;
+        isCut = 0;
+    }
+    Refresh();
+}
+
+void DeleteFiles() {
+    char files[MAX_PATH * 100];
+    int count;
+    GetSelectedFiles(files, &count);
+    if (count == 0) return;
+    
+    if (MessageBox(NULL, "Delete selected items?", "Confirm", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    
+    char* p = files;
+    while (*p) {
+        DWORD attr = GetFileAttributes(p);
+        if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+            RemoveDirectory(p);
+        } else {
+            DeleteFile(p);
+        }
+        p += strlen(p) + 1;
+    }
+    Refresh();
+}
+
+void DoRename() {
     int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
     if (sel == -1) return;
+    
     char name[MAX_PATH];
     LVITEM lvi;
     memset(&lvi, 0, sizeof(lvi));
@@ -248,15 +526,135 @@ void OpenSelectedItem() {
     lvi.pszText = name;
     lvi.cchTextMax = MAX_PATH;
     ListView_GetItem(hList, &lvi);
-    char fp[MAX_PATH];
-    sprintf(fp, "%s\\%s", currentPath, name);
-    WIN32_FIND_DATA fd;
-    HANDLE hf = FindFirstFile(fp, &fd);
-    if (hf != INVALID_HANDLE_VALUE) {
-        FindClose(hf);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) PopulateListView(fp);
-        else ShellExecute(NULL, "open", fp, NULL, NULL, SW_SHOWNORMAL);
+    
+    char newName[MAX_PATH];
+    strcpy(newName, name);
+    
+    HWND hEdit = CreateWindow("EDIT", newName, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        0, 0, 280, 20, hList, NULL, NULL, NULL);
+    SetFocus(hEdit);
+    
+    RECT rc;
+    ListView_GetItemRect(hList, sel, &rc, LVIR_LABEL);
+    SetWindowPos(hEdit, NULL, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER);
+    
+    MSG msg;
+    int done = 0;
+    while (!done && GetMessage(&msg, NULL, 0, 0)) {
+        if (msg.message == WM_KEYDOWN) {
+            if (msg.wParam == VK_RETURN) {
+                GetWindowText(hEdit, newName, MAX_PATH);
+                done = 1;
+            } else if (msg.wParam == VK_ESCAPE) {
+                done = 2;
+            }
+        } else if (msg.message == WM_LBUTTONDOWN || msg.message == WM_RBUTTONDOWN) {
+            done = 2;
+        }
+        if (done) break;
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
+    DestroyWindow(hEdit);
+    
+    if (done == 1 && newName[0] && strcmp(name, newName)) {
+        char oldPath[MAX_PATH], newPath[MAX_PATH];
+        sprintf(oldPath, "%s\\%s", currentPath, name);
+        sprintf(newPath, "%s\\%s", currentPath, newName);
+        MoveFile(oldPath, newPath);
+        Refresh();
+    }
+}
+
+void ShowContextMenu(HWND hwnd, int x, int y) {
+    char files[MAX_PATH * 100];
+    int count;
+    GetSelectedFiles(files, &count);
+    
+    HMENU hMenu = CreatePopupMenu();
+    
+    AppendMenu(hMenu, MF_STRING, OPC_NEWFOLDER, "New Folder");
+    AppendMenu(hMenu, MF_STRING, OPC_NEWFILE, "New File");
+    AppendMenu(hMenu, MF_SEPARATOR, 0, "");
+    
+    if (count > 0) {
+        AppendMenu(hMenu, MF_STRING, OPC_OPEN, "Open");
+        AppendMenu(hMenu, MF_SEPARATOR, 0, "");
+        AppendMenu(hMenu, MF_STRING, OPC_COPY, "Copy");
+        AppendMenu(hMenu, MF_STRING, OPC_CUT, "Cut");
+        if (clipOp) AppendMenu(hMenu, MF_STRING, OPC_PASTE, "Paste");
+        AppendMenu(hMenu, MF_SEPARATOR, 0, "");
+        if (count == 1) AppendMenu(hMenu, MF_STRING, OPC_RENAME, "Rename");
+        AppendMenu(hMenu, MF_STRING, OPC_DELETE, "Delete");
+        AppendMenu(hMenu, MF_SEPARATOR, 0, "");
+    } else if (clipOp) {
+        AppendMenu(hMenu, MF_STRING, OPC_PASTE, "Paste");
+        AppendMenu(hMenu, MF_SEPARATOR, 0, "");
+    }
+    
+    AppendMenu(hMenu, MF_STRING, OPC_PROPERTIES, "Properties");
+    
+    int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hwnd, NULL);
+    
+    switch (cmd) {
+        case OPC_NEWFOLDER: CreateNewFolder(); break;
+        case OPC_NEWFILE: CreateNewFile(); break;
+        case OPC_OPEN: OpenSelectedItem(); break;
+        case OPC_COPY: CopyFiles(); break;
+        case OPC_CUT: CutFiles(); break;
+        case OPC_PASTE: PasteFiles(); break;
+        case OPC_DELETE: DeleteFiles(); break;
+        case OPC_RENAME: DoRename(); break;
+        case OPC_PROPERTIES:
+            if (count > 0) {
+                char files[MAX_PATH * 100];
+                int c;
+                GetSelectedFiles(files, &c);
+                char* firstFile = files;
+                SHELLEXECUTEINFO sei = {0};
+                sei.cbSize = sizeof(sei);
+                sei.fMask = SEE_MASK_INVOKEIDLIST;
+                sei.hwnd = hwnd;
+                sei.lpFile = firstFile;
+                sei.lpVerb = "properties";
+                sei.nShow = SW_SHOWNORMAL;
+                ShellExecuteEx(&sei);
+            }
+            break;
+    }
+    
+    DestroyMenu(hMenu);
+}
+
+void HandleDrop(HDROP hDrop) {
+    char files[MAX_PATH * 100];
+    int count = DragQueryFile(hDrop, 0xFFFFFFFF, NULL, 0);
+    
+    files[0] = 0;
+    for (int i = 0; i < count; i++) {
+        char fp[MAX_PATH];
+        DragQueryFile(hDrop, i, fp, MAX_PATH);
+        strcat(files, fp);
+        files[strlen(fp) + 1] = 0;
+    }
+    files[strlen(files) + 1] = 0;
+    DragFinish(hDrop);
+    
+    char* src = files;
+    while (*src) {
+        char name[MAX_PATH];
+        char* p = strrchr(src, '\\');
+        if (p) strcpy(name, p + 1);
+        else strcpy(name, src);
+        
+        char dst[MAX_PATH];
+        sprintf(dst, "%s\\%s", currentPath, name);
+        
+        if (CopyFile(src, dst, FALSE)) {
+        }
+        src += strlen(src) + 1;
+    }
+    Refresh();
 }
 
 void ResizeControls(HWND hwnd) {
@@ -281,6 +679,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (wp == IDM_UP) NavigateUp();
             else if (wp == IDM_REFRESH) Refresh();
             return 0;
+        case WM_KEYDOWN:
+            if (wp == VK_F2) {
+                int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+                if (sel >= 0) ListView_EditLabel(hList, sel);
+            } else if (wp == VK_DELETE) {
+                DeleteFiles();
+            } else if (wp == VK_F5) {
+                Refresh();
+            }
+            return 0;
+        case WM_DROPFILES: HandleDrop((HDROP)wp); return 0;
         case WM_NOTIFY: {
             NMHDR* pnm = (NMHDR*)lp;
             if (pnm->idFrom == ID_TREE_VIEW && pnm->code == TVN_SELCHANGED) {
@@ -313,9 +722,57 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             } else if (pnm->idFrom == ID_LIST_VIEW && pnm->code == NM_DBLCLK) {
                 OpenSelectedItem();
+            } else if (pnm->idFrom == ID_LIST_VIEW && pnm->code == LVN_ENDLABELEDIT) {
+                NMLVDISPINFO* plvdi = (NMLVDISPINFO*)lp;
+                if (plvdi->item.pszText && plvdi->item.iItem >= 0) {
+                    char oldName[MAX_PATH];
+                    LVITEM lvi = {0};
+                    lvi.mask = LVIF_TEXT;
+                    lvi.iItem = plvdi->item.iItem;
+                    lvi.pszText = oldName;
+                    lvi.cchTextMax = MAX_PATH;
+                    ListView_GetItem(hList, &lvi);
+                    
+                    if (strcmp(oldName, plvdi->item.pszText) != 0) {
+                        char oldPath[MAX_PATH], newPath[MAX_PATH];
+                        sprintf(oldPath, "%s\\%s", currentPath, oldName);
+                        sprintf(newPath, "%s\\%s", currentPath, plvdi->item.pszText);
+                        MoveFile(oldPath, newPath);
+                        Refresh();
+                    }
+                }
+            } else if (pnm->idFrom == ID_LIST_VIEW && pnm->code == NM_RCLICK) {
+                DWORD pos = GetMessagePos();
+                int x = LOWORD(pos);
+                int y = HIWORD(pos);
+                
+                POINT pt = {x, y};
+                ScreenToClient(hList, &pt);
+                LVHITTESTINFO lvhti;
+                lvhti.pt = pt;
+                ListView_HitTest(hList, &lvhti);
+                if (lvhti.iItem >= 0) {
+                    if (!(ListView_GetItemState(hList, lvhti.iItem, LVIS_SELECTED) & LVIS_SELECTED)) {
+                        ListView_SetItemState(hList, -1, 0, LVIS_SELECTED);
+                        ListView_SetItemState(hList, lvhti.iItem, LVIS_SELECTED, LVIS_SELECTED);
+                    }
+                }
+                
+                ShowContextMenu(hwnd, x, y);
             }
             return 0;
         }
+        case WM_TIMER:
+            if (wp == 2 && editItem >= 0) {
+                KillTimer(hList, 2);
+                HWND hEdit = ListView_EditLabel(hList, editItem);
+                if (hEdit) {
+                    SendMessage(hEdit, EM_SETSEL, 0, -1);
+                    SetFocus(hEdit);
+                }
+                editItem = -1;
+            }
+            return 0;
         case WM_DESTROY: PostQuitMessage(0); return 0;
     }
     return DefWindowProc(hwnd, msg, wp, lp);

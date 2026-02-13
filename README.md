@@ -1,0 +1,1 @@
+this is a win based file exploer written by minimax-2.5 which is 10x faster than the default winodws file exploer.
